@@ -1,0 +1,68 @@
+name: serus-ops
+label: Serus Ops
+description: Deep graphite and navy with emerald signals, teal accents and a restrained amber glow.
+palette:
+  background: '#0b111b'
+  midground: '#bdcfd4'
+  foreground: {hex: '#e8f0f2', alpha: 0.0}
+  warmGlow: 'rgba(230, 173, 83, 0.07)'
+  noiseOpacity: 0.12
+typography:
+  fontSans: 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif'
+  fontDisplay: 'Inter, ui-sans-serif, system-ui, sans-serif'
+  fontMono: '"SFMono-Regular", Consolas, "Liberation Mono", monospace'
+  baseSize: '15px'
+  lineHeight: '1.6'
+  letterSpacing: '-0.008em'
+layout:
+  radius: '0.75rem'
+  density: comfortable
+layoutVariant: standard
+colorOverrides:
+  card: '#121c29'
+  cardForeground: '#e5edf2'
+  popover: '#172332'
+  popoverForeground: '#e5edf2'
+  primary: '#50c8b7'
+  primaryForeground: '#071b19'
+  secondary: '#202f40'
+  secondaryForeground: '#d8e4ec'
+  muted: '#1b2837'
+  mutedForeground: '#9aafbf'
+  accent: '#284354'
+  accentForeground: '#d0f4ee'
+  destructive: '#f18088'
+  destructiveForeground: '#230b12'
+  success: '#66d9a5'
+  warning: '#e8b968'
+  border: '#304153'
+  input: '#35495c'
+  ring: '#50c8b7'
+componentStyles:
+  card:
+    background: 'linear-gradient(155deg, #152130, #121c29)'
+    boxShadow: '0 4px 18px rgba(0, 0, 0, 0.12)'
+    borderRadius: '0.75rem'
+  header:
+    background: 'linear-gradient(180deg, #111c2a, #0d1520)'
+    boxShadow: '0 1px 0 #304153'
+  sidebar:
+    background: '#0e1723'
+  footer:
+    background: '#0d1520'
+  tab:
+    borderRadius: '0.5rem'
+  badge:
+    borderRadius: '0.4rem'
+  progress:
+    borderRadius: '0.5rem'
+  page:
+    background: 'transparent'
+customCSS: |
+  :root { scrollbar-color: #42566a #0d1520; scrollbar-width: thin; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #0d1520; }
+  ::-webkit-scrollbar-thumb { background: #42566a; border: 2px solid #0d1520; border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: #5b7489; }
+  ::selection { color: #e5fff7; background: #246657; }
+  :focus-visible { outline: 2px solid var(--color-ring); outline-offset: 3px; }
