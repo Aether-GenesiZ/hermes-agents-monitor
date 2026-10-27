@@ -72,22 +72,31 @@
         props.description ? h("p", { className: "am-muted am-caption" }, props.description) : null),
       h(C.CardContent, { className: "am-section-content" }, props.children));
   }
-  function linePoints(samples, key, width, height, maximum, start, end) {
+  // Headroom: map values against 1.25x the window max so a peak line sits at
+  // ~80% of the plot height instead of on the top gridline — and the label
+  // lives in its own band above the SVG (see .am-chart-wrap padding-top), so
+  // line and label can never collide regardless of font metrics/DPI.
+  function linePoints(samples, key, x0, x1, top, bottom, maximum, start, end) {
+    var scale = maximum * 1.25;
     return samples.map(function (sample) {
-      var x = 2 + ((sample.t - start) / Math.max(1, end - start)) * (width - 4);
-      var y = height - 3 - (number(sample[key]) / maximum) * (height - 8);
+      var x = x0 + ((sample.t - start) / Math.max(1, end - start)) * (x1 - x0);
+      var y = bottom - (number(sample[key]) / scale) * (bottom - top);
       return x.toFixed(2) + "," + y.toFixed(2);
     }).join(" ");
   }
+  // Chart geometry: top margin keeps a max-value line clear of the top-left
+  // scale label; x insets keep the endpoint dots from clipping at the edges.
+  var CHART = { x0: 4, x1: 792, top: 26, bottom: 157 };
+  var SPARK = { x0: 4, x1: 112, top: 7, bottom: 30 };
   function Sparkline(props) {
     var samples = props.samples.slice(-60);
     if (!samples.length) return null;
     var maximum = Math.max(1, ...samples.map(function (s) { return number(s[props.series.key]); }));
     var end = samples[samples.length - 1].t;
-    var points = linePoints(samples, props.series.key, 120, 34, maximum, end - 59 * POLL_MS, end);
+    var points = linePoints(samples, props.series.key, SPARK.x0, SPARK.x1, SPARK.top, SPARK.bottom, maximum, end - 59 * POLL_MS, end);
     return h("svg", { className: "am-spark", viewBox: "0 0 120 34", preserveAspectRatio: "none", "aria-hidden": true },
       h("polyline", { points: points, fill: "none", stroke: color(props.series.tone), strokeWidth: 1.8, vectorEffect: "non-scaling-stroke" }),
-      h("circle", { cx: 118, cy: points.split(" ").pop().split(",")[1], r: 2.2, fill: color(props.series.tone) }));
+      h("circle", { cx: SPARK.x1, cy: points.split(" ").pop().split(",")[1], r: 2.2, fill: color(props.series.tone) }));
   }
   function StatTile(props) {
     return h("div", { className: "am-stat" },
@@ -104,27 +113,27 @@
       return Math.max(...SERIES.map(function (series) { return number(sample[series.key]); }));
     }));
     var children = [h("title", { key: "title" }, "Activity counts over the last 12 minutes"),
-      h("desc", { key: "desc" }, "Counts sampled every 3 seconds while this page is open. Current values are in the stat tiles. Solid: turns; dashed: delegations; dotted: subagents; dash-dot: processes.")];
+      h("desc", { key: "desc" }, "Counts are sampled every 3 seconds server-side and kept for 15 minutes, so the timeline survives page refreshes. Solid: turns; dashed: delegations; dotted: subagents; dash-dot: processes.")];
     [0, 0.5, 1].forEach(function (fraction) {
-      var y = 157 - fraction * 152;
-      children.push(h("line", { key: "grid" + fraction, x1: 2, x2: 798, y1: y, y2: y, stroke: color("border"), strokeDasharray: "3 5" }));
+      var y = CHART.bottom - fraction * (CHART.bottom - CHART.top);
+      children.push(h("line", { key: "grid" + fraction, x1: CHART.x0, x2: CHART.x1, y1: y, y2: y, stroke: color("border"), strokeDasharray: "3 5" }));
     });
     SERIES.forEach(function (series) {
-      var points = linePoints(samples, series.key, 800, 160, maximum, start, end);
+      var points = linePoints(samples, series.key, CHART.x0, CHART.x1, CHART.top, CHART.bottom, maximum, start, end);
       if (!points) return;
       var firstX = points.split(",")[0];
-      children.push(h("polygon", { key: series.key + "area", points: firstX + ",157 " + points + " 798,157", fill: color(series.tone), opacity: 0.04 }));
+      children.push(h("polygon", { key: series.key + "area", points: firstX + "," + CHART.bottom + " " + points + " " + CHART.x1 + "," + CHART.bottom, fill: color(series.tone), opacity: 0.04 }));
       children.push(h("polyline", { key: series.key, points: points, fill: "none", stroke: color(series.tone), strokeWidth: 2, strokeDasharray: series.dash, vectorEffect: "non-scaling-stroke", strokeLinejoin: "round" }));
-      children.push(h("circle", { key: series.key + "point", cx: 798, cy: 157 - number(samples[samples.length - 1][series.key]) / maximum * 152, r: 2.5, fill: color(series.tone) }));
+      children.push(h("circle", { key: series.key + "point", cx: CHART.x1, cy: CHART.bottom - number(samples[samples.length - 1][series.key]) / (maximum * 1.25) * (CHART.bottom - CHART.top), r: 2.5, fill: color(series.tone) }));
     });
-    return h(SectionCard, { title: "Activity (last 12 min)", description: "3-second samples · history builds while this page is open" },
+    return h(SectionCard, { title: "Activity (last 12 min)", description: "3-second samples · history persists across refreshes (15-minute server-side buffer)" },
       h("div", { className: "am-legend" }, SERIES.map(function (series) {
         return h("span", { key: series.key, className: "am-legend-item" },
           h("svg", { width: 24, height: 8, "aria-hidden": true }, h("line", { x1: 0, x2: 24, y1: 4, y2: 4, stroke: color(series.tone), strokeWidth: 2, strokeDasharray: series.dash })), series.label);
       })),
       h("div", { className: "am-chart-wrap" },
         h("span", { className: "am-chart-max am-muted" }, maximum),
-        h("svg", { className: "am-chart", viewBox: "0 0 800 160", preserveAspectRatio: "none", role: "img", "aria-label": "Activity over 12 minutes, scale 0 to " + maximum }, children)),
+        h("svg", { className: "am-chart", viewBox: "0 0 800 160", preserveAspectRatio: "none", role: "img", "aria-label": "Activity over 12 minutes, peak value " + maximum }, children)),
       h("div", { className: "am-chart-axis am-muted" }, h("span", null, "12 min ago"), h("span", null, "6 min ago"), h("span", null, "Now")));
   }
   function TurnRow(props) {
@@ -231,8 +240,18 @@
           var t = Date.now();
           if (!seeded.current) {
             seeded.current = true;
+            // Backend history stores epoch seconds; the chart runs in epoch
+            // milliseconds. Normalise on seed or the window filter below
+            // purges every loaded sample instantly (chart restarted on refresh).
             if (Array.isArray(data.history)) {
-              history.current = data.history.filter(function (s) { return s && typeof s.t === "number"; });
+              history.current = data.history
+                .filter(function (s) { return s && typeof s.t === "number"; })
+                .map(function (s) {
+                  var copy = {};
+                  for (var key in s) copy[key] = s[key];
+                  copy.t = s.t < 1e11 ? s.t * 1000 : s.t;
+                  return copy;
+                });
             }
           }
           var sample = { t: t };

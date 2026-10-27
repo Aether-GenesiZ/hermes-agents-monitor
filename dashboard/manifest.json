@@ -3,7 +3,7 @@
   "label": "Agents",
   "description": "Realtime monitor: active agent turns, subagent delegations with depth levels, and background processes.",
   "icon": "Activity",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "tab": {
     "path": "/agents",
     "position": "after:status"

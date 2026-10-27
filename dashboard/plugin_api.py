@@ -15,6 +15,7 @@ import json
 import math
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime
 
@@ -48,6 +49,7 @@ def _duration(started, finished, now: float, live: bool) -> float | None:
 
 _HISTORY_WINDOW_SECONDS = 15 * 60.0
 _HISTORY_APPENDS_BETWEEN_PRUNES = 40
+_SAMPLER_INTERVAL_SECONDS = 3.0
 _history_appends = 0
 _RECENT_SESSION_SECONDS = 120.0
 _RECENT_DONE_DELEGATIONS = 20
@@ -342,7 +344,7 @@ def _read_history(home: str, now: float) -> list:
             continue
         if isinstance(entry, dict) and entry.get("t") and float(entry["t"]) >= cutoff:
             samples.append(entry)
-    return samples[-240:]
+    return samples[-300:]
 
 
 def _append_history(home: str, now: float, counts: dict) -> None:
@@ -366,7 +368,8 @@ def _append_history(home: str, now: float, counts: dict) -> None:
         pass
 
 
-def _collect() -> dict:
+def _snapshot() -> dict:
+    """One read of the durable state: counts plus the row payloads."""
     now = time.time()
     home = _hermes_home()
     con = _db_connect(home)
@@ -383,15 +386,41 @@ def _collect() -> dict:
         "subagents": sum(d.get("task_count") or 0 for d in delegations if d.get("live")),
         "processes": len([p for p in processes if p.get("status") == "running"]),
     }
-    _append_history(home, now, counts)
     return {
-        "generated_at": now,
+        "now": now,
+        "home": home,
         "active_turns": active_turns,
         "delegations": delegations,
         "processes": processes,
         "counts": counts,
-        "history": _read_history(home, now),
     }
+
+
+def _collect() -> dict:
+    snapshot = _snapshot()
+    return {
+        "generated_at": snapshot["now"],
+        "active_turns": snapshot["active_turns"],
+        "delegations": snapshot["delegations"],
+        "processes": snapshot["processes"],
+        "counts": snapshot["counts"],
+        "history": _read_history(snapshot["home"], snapshot["now"]),
+    }
+
+
+def _history_sampler() -> None:
+    """Record activity every few seconds even when nobody has the page open,
+    so the chart keeps its timeline across refreshes and idle periods."""
+    while True:
+        time.sleep(_SAMPLER_INTERVAL_SECONDS)
+        try:
+            snapshot = _snapshot()
+            _append_history(snapshot["home"], snapshot["now"], snapshot["counts"])
+        except Exception:
+            pass
+
+
+threading.Thread(target=_history_sampler, name="agents-monitor-history", daemon=True).start()
 
 
 @router.get("/overview")
