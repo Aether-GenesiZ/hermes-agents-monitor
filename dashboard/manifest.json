@@ -3,12 +3,11 @@
   "label": "Agents",
   "description": "Realtime monitor: active agent turns, subagent delegations with depth levels, and background processes.",
   "icon": "Activity",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "tab": {
     "path": "/agents",
     "position": "after:status"
   },
   "entry": "dist/index.js",
-  "api": "plugin_api.py",
-  "css": "dist/style.css"
+  "api": "plugin_api.py"
 }
