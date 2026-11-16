@@ -241,6 +241,14 @@ def _delegations(con: sqlite3.Connection, entries: dict, home: str, now: float) 
         dispatched = _ts(row["dispatched_at"])
         completed = _ts(row["completed_at"])
         tasks = _delegation_tasks(manifest, task, state, live, dispatched, completed, now)
+        if live:
+            for task_row in tasks:
+                if task_row.get("status") in ("running", "finalizing"):
+                    last = _last_line(os.path.join(
+                        home, "cache", "delegation", "live", row["delegation_id"],
+                        f"task-{task_row.get('index')}.log"))
+                    if last:
+                        task_row["last_line"] = last
         parent_route = route_by_session_id.get(row["parent_session_id"]) or {}
         parent_key = row["origin_session"] or parent_route.get("session_key") or ""
         parent_entry = entries.get(parent_key) or parent_route
@@ -288,6 +296,32 @@ def _proc_resources(pid: int, started, now: float):
     return rss_mb, cpu_pct
 
 
+def _tail_file(path: str, max_bytes: int, lines: int) -> list:
+    """Bounded tail read: last `lines` non-empty lines of the final `max_bytes`."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            if size > max_bytes:
+                handle.seek(-max_bytes, os.SEEK_END)
+                data = handle.read().decode("utf-8", errors="replace")
+                if "\n" in data:
+                    data = data.split("\n", 1)[1]
+            else:
+                data = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    return [line for line in data.splitlines() if line.strip()][-max(1, int(lines)):]
+
+
+def _last_line(path: str, limit: int = 160) -> str | None:
+    """One-line 'doing right now' hint from a log file (bounded read)."""
+    lines = _tail_file(path, 4096, 1)
+    if not lines:
+        return None
+    text = lines[-1].strip()
+    return text[:limit] if text else None
+
+
 def _processes(home: str, now: float) -> list:
     path = os.path.join(home, "processes.json")
     try:
@@ -320,6 +354,13 @@ def _processes(home: str, now: float) -> list:
         pid = row.get("pid")
         if status == "running" and isinstance(pid, int) and pid > 0:
             out[-1]["rss_mb"], out[-1]["cpu_avg_pct"] = _proc_resources(pid, started, now)
+        if status == "running":
+            log_path = row.get("output_log") or os.path.join(
+                home, "logs", "process-output", f"{row.get('session_id')}.log")
+            if isinstance(log_path, str) and log_path and os.path.isfile(log_path):
+                last = _last_line(log_path)
+                if last:
+                    out[-1]["last_line"] = last
     out.sort(key=lambda p: -(p.get("elapsed_s") or 0))
     return out[:100]
 
@@ -465,3 +506,43 @@ def _read_transcript(delegation: str, task, lines) -> dict:
 @router.get("/transcript")
 async def transcript(delegation: str, task: int = 0, lines: int = 40):
     return await asyncio.to_thread(_read_transcript, delegation, task, lines)
+
+
+def _read_process_log(process_id: str, lines: int) -> dict:
+    """Tail of a background process's output log (registry-resolved path only)."""
+    if not isinstance(process_id, str) or not process_id or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        for character in process_id
+    ):
+        return {"ok": False, "error": "invalid process id"}
+    try:
+        lines = max(5, min(int(lines or 40), 200))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid arguments"}
+    home = _hermes_home()
+    try:
+        with open(os.path.join(home, "processes.json"), encoding="utf-8") as handle:
+            rows = json.load(handle)
+    except Exception:
+        return {"ok": False, "error": "process registry unreadable"}
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    if not isinstance(rows, list):
+        return {"ok": False, "error": "process registry unreadable"}
+    for row in rows:
+        if not (isinstance(row, dict) and row.get("session_id") == process_id):
+            continue
+        log_path = row.get("output_log") or os.path.join(
+            home, "logs", "process-output", f"{process_id}.log")
+        if not isinstance(log_path, str) or not log_path:
+            return {"ok": False, "error": "no output log for this process"}
+        real = os.path.realpath(log_path)
+        if not os.path.isfile(real):
+            return {"ok": False, "error": "output log not found"}
+        return {"ok": True, "lines": _tail_file(real, 32768, lines)}
+    return {"ok": False, "error": "process not found"}
+
+
+@router.get("/process-log")
+async def process_log(process_id: str, lines: int = 40):
+    return await asyncio.to_thread(_read_process_log, process_id, lines)
