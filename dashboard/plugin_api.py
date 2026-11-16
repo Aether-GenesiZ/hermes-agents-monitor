@@ -409,6 +409,137 @@ def _append_history(home: str, now: float, counts: dict) -> None:
         pass
 
 
+_SERIES = ("turns", "live_delegations", "subagents", "processes")
+_MINUTE_KEEP = 1500
+_HOUR_KEEP = 744
+_rollup_state: dict = {"minute": None, "hour": None}
+
+
+def _rollup_path(home: str, kind: str) -> str:
+    return os.path.join(home, "cache", f"agents-monitor-rollups-{kind}.jsonl")
+
+
+def _read_rollups(home: str, kind: str, since: float) -> list:
+    """Minute/hour rollups, oldest first, filtered to ``since``."""
+    try:
+        with open(_rollup_path(home, kind), encoding="utf-8") as handle:
+            entries = []
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(entry, dict) and float(entry.get("t") or 0) >= since:
+                    entries.append(entry)
+            return entries
+    except OSError:
+        return []
+
+
+def _append_rollup(home: str, kind: str, entry: dict, keep: int) -> None:
+    path = _rollup_path(home, kind)
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except OSError:
+        return
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+        if len(lines) > keep + 60:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.writelines(lines[-keep:])
+            os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _last_rollup_bucket(path: str, size: float):
+    """Bucket index (epoch // size) of the newest rollup entry in a file."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            last = None
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(entry, dict) and entry.get("t"):
+                    last = float(entry["t"])
+        return int(last // size) if last is not None else None
+    except OSError:
+        return None
+
+
+def _fold(rows, t, nested_max=False):
+    """Average + peak of a bucket of rows (minute rollups carry m_* peaks)."""
+    if not rows:
+        return None
+    entry = {"t": t}
+    for key in _SERIES:
+        values = [float(r.get(key) or 0) for r in rows]
+        entry[key] = round(sum(values) / len(values), 2)
+        peaks = [float(r.get("m_" + key) or 0) for r in rows] if nested_max else values
+        entry["m_" + key] = max(peaks)
+    return entry
+
+
+def _rollup(home: str, now: float) -> None:
+    """Fold finished minutes/hours of raw history into durable rollups.
+
+    Raw history only keeps a 15-minute window, so minute rollups are the
+    mid-term store (24 hours) and hour rollups the long-term one (30 days).
+    """
+    now_min = int(now // 60)
+    if _rollup_state["minute"] is None:
+        _rollup_state["minute"] = _last_rollup_bucket(_rollup_path(home, "minute"), 60)
+        if _rollup_state["minute"] is None:
+            raw = _read_history(home, now)
+            # bootstrap from the oldest raw sample: fold every minute we still have
+            _rollup_state["minute"] = (int(float(raw[0]["t"]) // 60) - 1) if raw else now_min - 1
+    if now_min > _rollup_state["minute"]:
+        try:
+            with open(_history_path(home), encoding="utf-8") as handle:
+                raw_all = []
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw_all.append(json.loads(line))
+                    except Exception:
+                        continue
+        except OSError:
+            raw_all = []
+        for minute in range(_rollup_state["minute"] + 1, now_min):
+            rows = [r for r in raw_all if minute * 60 <= float(r.get("t") or 0) < (minute + 1) * 60]
+            entry = _fold(rows, minute * 60)
+            if entry:
+                _append_rollup(home, "minute", entry, _MINUTE_KEEP)
+            _rollup_state["minute"] = minute
+    now_hour = int(now // 3600)
+    if _rollup_state["hour"] is None:
+        _rollup_state["hour"] = _last_rollup_bucket(_rollup_path(home, "hour"), 3600)
+        if _rollup_state["hour"] is None:
+            # allow folding the last finished hour as soon as its minutes exist
+            _rollup_state["hour"] = now_hour - 2
+    if now_hour > _rollup_state["hour"]:
+        minutes = _read_rollups(home, "minute", 0.0)
+        for hour in range(_rollup_state["hour"] + 1, now_hour):
+            rows = [m for m in minutes if hour * 3600 <= float(m.get("t") or 0) < (hour + 1) * 3600]
+            entry = _fold(rows, hour * 3600, nested_max=True)
+            if entry:
+                _append_rollup(home, "hour", entry, _HOUR_KEEP)
+            _rollup_state["hour"] = hour
+
+
 def _snapshot() -> dict:
     """One read of the durable state: counts plus the row payloads."""
     now = time.time()
@@ -457,6 +588,7 @@ def _history_sampler() -> None:
         try:
             snapshot = _snapshot()
             _append_history(snapshot["home"], snapshot["now"], snapshot["counts"])
+            _rollup(snapshot["home"], snapshot["now"])
         except Exception:
             pass
 
@@ -467,6 +599,66 @@ threading.Thread(target=_history_sampler, name="agents-monitor-history", daemon=
 @router.get("/overview")
 async def overview():
     return await asyncio.to_thread(_collect)
+
+
+_HISTORY_RANGES = {"12m": 720.0, "1h": 3600.0, "24h": 86400.0, "7d": 604800.0, "30d": 2592000.0}
+
+
+def _collect_history(rng: str) -> dict:
+    """Series plus analysis stats for a time range, from raw samples or rollups."""
+    seconds = _HISTORY_RANGES.get(rng)
+    if seconds is None:
+        return {"ok": False, "error": "unknown range"}
+    now = time.time()
+    home = _hermes_home()
+    if rng == "12m":
+        rows = _read_history(home, now)
+        interval = 3.0
+    elif rng in ("1h", "24h"):
+        rows = _read_rollups(home, "minute", now - seconds)
+        interval = 60.0
+    else:
+        rows = _read_rollups(home, "hour", now - seconds)
+        interval = 3600.0
+    points = []
+    for entry in rows:
+        row = {"t": float(entry.get("t") or 0)}
+        for key in _SERIES:
+            row[key] = round(float(entry.get(key) or 0), 2)
+        points.append(row)
+    if len(points) > 480:
+        bucket = -(-len(points) // 480)
+        merged = []
+        for index in range(0, len(points), bucket):
+            group = points[index:index + bucket]
+            row = {"t": group[0]["t"]}
+            for key in _SERIES:
+                row[key] = round(sum(g[key] for g in group) / len(group), 2)
+            merged.append(row)
+        points = merged
+    stats = {"peaks": {}, "peaks_at": {}, "averages": {}, "hours": {}}
+    if points:
+        for key in _SERIES:
+            values = [p[key] for p in points]
+            peak_index = max(range(len(values)), key=lambda i: values[i])
+            stats["peaks"][key] = values[peak_index]
+            stats["peaks_at"][key] = points[peak_index]["t"]
+            stats["averages"][key] = round(sum(values) / len(values), 2)
+            stats["hours"][key] = round(sum(values) * interval / 3600.0, 1)
+    if rng in ("24h", "7d", "30d"):
+        best, best_total = None, -1.0
+        for entry in _read_rollups(home, "hour", 0.0):
+            total = sum(float(entry.get(key) or 0) for key in _SERIES)
+            if total > best_total:
+                best, best_total = entry, total
+        if best and best_total > 0:
+            stats["busiest_hour"] = time.strftime("%H:%M", time.localtime(float(best["t"])))
+    return {"ok": True, "range": rng, "interval": interval, "points": points, "stats": stats}
+
+
+@router.get("/history")
+async def history(range: str = "12m"):
+    return await asyncio.to_thread(_collect_history, range)
 
 
 def _read_transcript(delegation: str, task, lines) -> dict:
